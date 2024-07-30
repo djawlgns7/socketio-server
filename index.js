@@ -25,7 +25,7 @@ const idByNickname = {};
 // disconnect 후에 일정 시간 동안 재접속을 기다리기 위한 타이머 리스트
 const disconnectTimers = {};
 // 재접속 대기 시간
-const DISCONNECT_TIMEOUT = 2500;
+const DISCONNECT_TIMEOUT = 2000;
 
 // 소켓이 연결될 때
 io.on('connection', (socket) => {
