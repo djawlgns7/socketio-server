@@ -86,6 +86,12 @@ io.on('connection', (socket) => {
         io.to(room).emit('receive_message', {nickname, message});
     });
 
+    // 나와 같은 방에 있는 사람들에게 공지를 보냄
+    socket.on('announce', (data) => {
+        const {room, message} = data;
+        io.to(room).emit('announce_message', {message});
+    });
+
     // 접속중인 친구들에게 메시지를 보냄
     socket.on('send_message_to_friends', async (data) => {
         const {nickname, message} = data;
