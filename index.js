@@ -3,14 +3,16 @@ const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
 const axios = require('axios');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 const server = http.createServer(app);
 const BACK_URL = 'http://localhost:8080';
 const io = socketIo(server, {
     cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
+        origin: "http://localhost:5173",
+        methods: ["GET", "POST"],
+        credentials: true, // 쿠키를 자동으로 전송
     },
     pingInterval: 25000, // 핑 간격을 25초로 설정
     pingTimeout: 30000   // 응답 대기 시간을 30초로 설정
@@ -18,23 +20,60 @@ const io = socketIo(server, {
 
 app.use(cors());
 
-// id를 키값으로 닉네임을 저장
 const nicknameById = {};
-// 닉네임을 키값으로 id의 리스트를 저장
 const idByNickname = {};
-// disconnect 후에 일정 시간 동안 재접속을 기다리기 위한 타이머 리스트
+const tokensByNickname = {};  // 유저별 토큰을 관리하는 객체
 const disconnectTimers = {};
-// 재접속 대기 시간
 const DISCONNECT_TIMEOUT = 2000;
+
+// JWT 만료 시간 계산
+function getTokenExpiration(token) {
+    try {
+        const decoded = jwt.decode(token);
+        return decoded.exp * 1000; // 밀리초 단위로 변환
+    } catch (error) {
+        console.error('Error decoding token:', error);
+        return null;
+    }
+}
+
+// 토큰 갱신 함수
+async function refreshToken(nickname) {
+    try {
+
+        const response = await axios.post(`${BACK_URL}/reissue`, {}, {
+            withCredentials: true, // 쿠키에서 refresh token이 전송됨
+        });
+
+        const newAccessToken = response.data.accessToken;
+        tokensByNickname[nickname].accessToken = newAccessToken; // 새 토큰 저장
+        console.log(`Token refreshed for ${nickname}`);
+
+        // 새로운 만료 시간에 맞춰 다시 타이머 설정
+        scheduleTokenRefresh(nickname, newAccessToken);
+    } catch (error) {
+        console.error("Error refreshing token:", error);
+    }
+}
+
+// 토큰 갱신 타이머 설정
+function scheduleTokenRefresh(nickname, token) {
+    const expirationTime = getTokenExpiration(token);
+    const currentTime = Date.now();
+    const delay = expirationTime - currentTime - 1000; // 만료 1분 전에 갱신
+
+    if (delay > 0) {
+        setTimeout(() => {
+            refreshToken(nickname);
+        }, delay);
+    }
+}
 
 // 소켓이 연결될 때
 io.on('connection', (socket) => {
     console.log('a user connected:', socket.id);
 
-    // 소켓을 활용해서 로그인을 한다.
-    socket.on('login', async (nickname) => {
-
-        // 유저의 아이디와 닉네임을 키 값으로 정보를 저장
+    socket.on('login', async ({nickname, accessToken}) => {
         nicknameById[socket.id] = nickname;
 
         if (!idByNickname[nickname]) {
@@ -42,18 +81,18 @@ io.on('connection', (socket) => {
         }
         idByNickname[nickname].push(socket.id);
 
-        // 재접속 시 disconnect 타이머 취소
+        tokensByNickname[nickname] = { accessToken }; // 토큰 저장
+        scheduleTokenRefresh(nickname, accessToken); // 토큰 갱신 타이머 설정
+
         if (disconnectTimers[nickname]) {
             clearTimeout(disconnectTimers[nickname]);
             delete disconnectTimers[nickname];
         }
 
         try {
-            // 유저의 상태를 db에서 online으로 바꿈
             await setOnline(nickname, true);
             console.log(`User ${nickname}(${socket.id}) login`);
 
-            // 접속중인 친구 목록을 DB에서 받아와서 그 친구들에게 소켓으로 로그인을 했다고 알려줌
             const onlineFriends = await getOnlineFriends(nickname);
 
             onlineFriends.forEach(friend => {
@@ -68,31 +107,26 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 채팅 방에 입장
     socket.on('join_room', (room) => {
         socket.join(room);
         console.log(`User ${socket.id} joined room ${room}`);
     });
 
-    // 채팅 방을 떠남
     socket.on('leave_room', (room) => {
         socket.leave(room);
         console.log(`User ${socket.id} left room ${room}`);
     });
 
-    // 나와 같은 방에 있는 사람들에게 메시지를 보냄
     socket.on('send_message', (data) => {
         const {nickname, room, message} = data;
         io.to(room).emit('receive_message', {nickname, message});
     });
 
-    // 나와 같은 방에 있는 사람들에게 공지를 보냄
     socket.on('announce', (data) => {
         const {room, message} = data;
         io.to(room).emit('announce_message', {message});
     });
 
-    // 접속중인 친구들에게 메시지를 보냄
     socket.on('send_message_to_friends', async (data) => {
         const {nickname, message} = data;
         try {
@@ -111,7 +145,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 소켓 접속 종료 시 작동
     socket.on('disconnect', () => {
         const nickname = nicknameById[socket.id];
         delete nicknameById[socket.id];
@@ -135,6 +168,8 @@ io.on('connection', (socket) => {
                             }
                         });
 
+                        delete tokensByNickname[nickname]; // 유저가 완전히 끊기면 토큰 삭제
+
                         console.log(`User ${nickname} fully disconnected after timeout`);
                     } catch (error) {
                         console.error("Error in disconnect event:", error);
@@ -150,7 +185,13 @@ io.on('connection', (socket) => {
 // DB에서 특정 유저의 접속 상태를 변경
 const setOnline = async (nickname, isOnline) => {
     try {
-        await axios.put(`${BACK_URL}/user/status/update2?nickname=${nickname}&isOnline=${isOnline}`, {});
+        const { accessToken } = tokensByNickname[nickname];
+
+        await axios.put(`${BACK_URL}/user/status/update2?nickname=${nickname}&isOnline=${isOnline}`, {}, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`
+            }
+        });
     } catch (error) {
         console.error("error setting online:", error);
     }
@@ -158,8 +199,15 @@ const setOnline = async (nickname, isOnline) => {
 
 // 접속 중인 친구 목록을 받음
 const getOnlineFriends = async (nickname) => {
+
     try {
-        const response = await axios.get(`${BACK_URL}/friend/list/online2?nickname=${nickname}`);
+        const { accessToken } = tokensByNickname[nickname];
+
+        const response = await axios.get(`${BACK_URL}/friend/list/online2?nickname=${nickname}`, {
+            headers: {
+                Authorization: `Bearer ${accessToken}`
+            }
+        });
         return response.data;
     } catch (error) {
         console.error("error fetching online friends list:", error);
