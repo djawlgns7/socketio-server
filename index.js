@@ -41,13 +41,10 @@ function getTokenExpiration(token) {
 async function refreshToken(nickname) {
     try {
 
-        const response = await axios.post(`${BACK_URL}/reissue`, {}, {
-            withCredentials: true, // 쿠키에서 refresh token이 전송됨
-        });
+        const response = await axios.post(`${BACK_URL}/reissue/socket?nickname=${nickname}`);
+        const newAccessToken = response.data;
 
-        const newAccessToken = response.data.accessToken;
         tokensByNickname[nickname].accessToken = newAccessToken; // 새 토큰 저장
-        console.log(`Token refreshed for ${nickname}`);
 
         // 새로운 만료 시간에 맞춰 다시 타이머 설정
         scheduleTokenRefresh(nickname, newAccessToken);
@@ -60,7 +57,7 @@ async function refreshToken(nickname) {
 function scheduleTokenRefresh(nickname, token) {
     const expirationTime = getTokenExpiration(token);
     const currentTime = Date.now();
-    const delay = expirationTime - currentTime - 1000; // 만료 1분 전에 갱신
+    const delay = expirationTime - currentTime - 60000; // 만료 1분 전에 갱신
 
     if (delay > 0) {
         setTimeout(() => {
@@ -74,6 +71,7 @@ io.on('connection', (socket) => {
     console.log('a user connected:', socket.id);
 
     socket.on('login', async ({nickname, accessToken}) => {
+
         nicknameById[socket.id] = nickname;
 
         if (!idByNickname[nickname]) {
@@ -81,7 +79,7 @@ io.on('connection', (socket) => {
         }
         idByNickname[nickname].push(socket.id);
 
-        tokensByNickname[nickname] = { accessToken }; // 토큰 저장
+        tokensByNickname[nickname] = {accessToken}; // 토큰 저장
         scheduleTokenRefresh(nickname, accessToken); // 토큰 갱신 타이머 설정
 
         if (disconnectTimers[nickname]) {
@@ -185,9 +183,9 @@ io.on('connection', (socket) => {
 // DB에서 특정 유저의 접속 상태를 변경
 const setOnline = async (nickname, isOnline) => {
     try {
-        const { accessToken } = tokensByNickname[nickname];
+        const {accessToken} = tokensByNickname[nickname];
 
-        await axios.put(`${BACK_URL}/user/status/update2?nickname=${nickname}&isOnline=${isOnline}`, {}, {
+        await axios.put(`${BACK_URL}/api/user/status/update2?nickname=${nickname}&isOnline=${isOnline}`, {}, {
             headers: {
                 Authorization: `Bearer ${accessToken}`
             }
@@ -201,7 +199,7 @@ const setOnline = async (nickname, isOnline) => {
 const getOnlineFriends = async (nickname) => {
 
     try {
-        const { accessToken } = tokensByNickname[nickname];
+        const {accessToken} = tokensByNickname[nickname];
 
         const response = await axios.get(`${BACK_URL}/friend/list/online2?nickname=${nickname}`, {
             headers: {
