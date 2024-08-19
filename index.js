@@ -7,10 +7,10 @@ const jwt = require('jsonwebtoken');
 
 const app = express();
 const server = http.createServer(app);
-const BACK_URL = 'http://localhost:8080';
+const BACK_URL = 'https://back.bit-two.com';
 const io = socketIo(server, {
     cors: {
-        origin: "http://localhost:5173",
+        origin: "https://re.bit-two.com",
         methods: ["GET", "POST"],
         credentials: true, // 쿠키를 자동으로 전송
     },
